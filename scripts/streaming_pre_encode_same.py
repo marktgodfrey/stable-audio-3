@@ -648,7 +648,7 @@ def get_gpu_stats(device):
 GPU_STATS_CACHE = {}
 
 
-def load_same_autoencoder(model_name):
+def load_same_autoencoder(model_name, device=None):
     """Load a Stable Audio 3 SAME autoencoder.
 
     The SA3 docs use aliases like "same-l". Some workflows refer to the
@@ -656,15 +656,15 @@ def load_same_autoencoder(model_name):
     then the corresponding alias/repo fallback for convenience.
     """
     try:
-        return AutoencoderModel.from_pretrained(model_name)
+        return AutoencoderModel.from_pretrained(model_name, device=device)
     except Exception:
         normalized = str(model_name).strip().lower()
         if normalized in {"stabilityai/same-l", "same-l", "same_l", "samel"}:
             fallback = "same-l" if normalized != "same-l" else "stabilityai/SAME-L"
-            return AutoencoderModel.from_pretrained(fallback)
+            return AutoencoderModel.from_pretrained(fallback, device=device)
         if normalized in {"stabilityai/same-s", "same-s", "same_s", "sames"}:
             fallback = "same-s" if normalized != "same-s" else "stabilityai/SAME-S"
-            return AutoencoderModel.from_pretrained(fallback)
+            return AutoencoderModel.from_pretrained(fallback, device=device)
         raise
 
 
@@ -1100,11 +1100,13 @@ def flush_gpu_worker_pending(gpu_pending, model, args, output_path, device, resu
 def gpu_encode_worker_loop(device, args, output_path, input_queue, result_queue):
     maybe_set_cuda_device(device)
     print(f"[gpu:{device}] loading SAME autoencoder: {args.same_model}")
-    model = load_same_autoencoder(args.same_model)
-    model = model.to(device)
+    model = load_same_autoencoder(args.same_model, device=str(device))
+    # AutoencoderModel is a lightweight wrapper, not an nn.Module.
+    # The real torch module lives at model.autoencoder and is already moved
+    # by from_pretrained(..., device=...).
     if args.model_half:
-        model = model.half()
-    model.eval()
+        model.autoencoder = model.autoencoder.half()
+    model.autoencoder.eval().requires_grad_(False)
 
     gpu_pending = []
     target_gpu_batch_size = args.target_gpu_batch_size or args.batch_size
