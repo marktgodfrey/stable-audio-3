@@ -1,0 +1,213 @@
+"""
+Train or continue training a full Stable Audio 3 diffusion model.
+
+Dataset config example for S3 WebDataset shards:
+{
+  "dataset_type": "s3",
+  "pre_encoded": true,
+  "datasets": [
+    {"id": "train", "s3_path": "s3://my-bucket/datasets/latents/train/"}
+  ],
+  "epoch_steps": 2000,
+  "random_crop": true,
+  "s3_streaming": {
+    "stream_idle_timeout_sec": 300
+  }
+}
+"""
+
+import argparse
+import json
+import os
+
+import pytorch_lightning as pl
+import torch
+from safetensors.torch import load_file
+
+from stable_audio_3.data.dataset import create_dataloader_from_config
+from stable_audio_3.factory import create_diffusion_cond_from_config
+from stable_audio_3.loading_utils import copy_state_dict
+from stable_audio_3.model_configs import base_models
+from stable_audio_3.training.diffusion import DiffusionCondTrainingWrapper
+
+
+class ExceptionCallback(pl.Callback):
+    def on_exception(self, trainer, module, err):
+        print(f"{type(err).__name__}: {err}")
+
+
+def load_model(model_name, model_config_path, checkpoint_path, device):
+    if model_name is not None:
+        if model_name not in base_models:
+            raise ValueError(f"Unknown model '{model_name}', valid: {list(base_models)}")
+        resolved_config, resolved_checkpoint = base_models[model_name].resolve()
+        model_config_path = model_config_path or resolved_config
+        checkpoint_path = checkpoint_path or resolved_checkpoint
+
+    if model_config_path is None:
+        raise ValueError("Provide --model or --model_config")
+
+    with open(model_config_path) as f:
+        model_config = json.load(f)
+
+    model = create_diffusion_cond_from_config(model_config)
+    if checkpoint_path is not None:
+        copy_state_dict(model, load_file(checkpoint_path))
+
+    model.to(device=device).train()
+    return model, model_config
+
+
+def train(args):
+    torch._dynamo.config.capture_scalar_outputs = True
+    torch.set_float32_matmul_precision("high")
+    pl.seed_everything(args.seed, workers=True)
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model, model_config = load_model(
+        args.model,
+        args.model_config,
+        args.checkpoint,
+        device,
+    )
+
+    sample_rate = model_config.get("sample_rate", getattr(model, "sample_rate", 44100))
+    ds_ratio = model.pretransform.downsampling_ratio if model.pretransform is not None else 1
+    sample_size = (int(args.duration * sample_rate) // ds_ratio) * ds_ratio
+
+    with open(args.dataset_config) as f:
+        dataset_config = json.load(f)
+
+    if dataset_config.get("pre_encoded", False) and dataset_config.get("latent_crop_length") is None:
+        dataset_config["latent_crop_length"] = sample_size // ds_ratio
+
+    dataloader = create_dataloader_from_config(
+        dataset_config,
+        batch_size=args.batch_size,
+        sample_size=sample_size,
+        sample_rate=sample_rate,
+        num_workers=args.num_workers,
+        audio_channels=args.audio_channels,
+    )
+
+    optimizer_config = {
+        "diffusion": {
+            "optimizer": {
+                "type": "AdamW",
+                "config": {
+                    "lr": args.lr,
+                    "weight_decay": args.weight_decay,
+                    "betas": [0.9, 0.95],
+                },
+            }
+        }
+    }
+
+    training_wrapper = DiffusionCondTrainingWrapper(
+        model,
+        mask_loss_weight=args.mask_loss_weight,
+        mask_padding_attention=args.mask_padding_attention,
+        silence_extension_scale_seconds=args.silence_extension_scale_seconds,
+        use_ema=args.use_ema,
+        log_loss_info=args.log_loss_info,
+        optimizer_configs=optimizer_config,
+        pre_encoded=dataset_config.get("pre_encoded", False),
+        timestep_sampler=args.timestep_sampler,
+        timestep_sampler_options={},
+        inpainting_config={"mask_kwargs": {"mask_type_probabilities": [0.1, 0.8, 0.1]}}
+        if args.inpainting
+        else None,
+        use_effective_length_for_schedule=args.use_effective_length_for_schedule,
+        sample_rate=sample_rate,
+        sample_size=sample_size,
+        log_every_n_steps=args.log_every,
+        ot_coupling=args.ot_coupling,
+    )
+
+    logger = None
+    if args.logger == "wandb":
+        logger = pl.loggers.WandbLogger(project=args.name)
+        logger.watch(training_wrapper)
+    elif args.logger == "comet":
+        logger = pl.loggers.CometLogger(project=args.name)
+    elif args.logger == "csv":
+        logger = pl.loggers.CSVLogger(args.save_dir, name=args.name)
+
+    checkpoint_dir = os.path.join(args.save_dir, args.name, "checkpoints")
+    callbacks = [
+        pl.callbacks.ModelCheckpoint(
+            every_n_train_steps=args.checkpoint_every,
+            dirpath=checkpoint_dir,
+            save_top_k=-1,
+        ),
+        ExceptionCallback(),
+        pl.callbacks.ModelSummary(max_depth=2),
+    ]
+
+    trainer = pl.Trainer(
+        devices="auto",
+        accelerator="auto",
+        strategy=args.strategy,
+        precision=args.precision,
+        accumulate_grad_batches=args.accumulate_grad_batches,
+        callbacks=callbacks,
+        logger=logger,
+        log_every_n_steps=1,
+        max_steps=args.steps,
+        default_root_dir=args.save_dir,
+        gradient_clip_val=args.gradient_clip_val or None,
+        num_sanity_val_steps=0,
+    )
+
+    trainer.fit(training_wrapper, dataloader, ckpt_path=args.resume_from_checkpoint)
+
+    if args.export_path:
+        os.makedirs(os.path.dirname(args.export_path) or ".", exist_ok=True)
+        training_wrapper.export_model(args.export_path, use_safetensors=args.export_path.endswith(".safetensors"))
+
+
+def main():
+    p = argparse.ArgumentParser(description="Train a full Stable Audio 3 diffusion model")
+    p.add_argument("--model", choices=list(base_models), default=None)
+    p.add_argument("--model_config", default=None)
+    p.add_argument("--checkpoint", default=None)
+    p.add_argument("--resume_from_checkpoint", default=None)
+    p.add_argument("--dataset_config", required=True)
+    p.add_argument("--duration", type=float, default=380.0)
+    p.add_argument("--audio_channels", type=int, choices=[1, 2], default=2)
+    p.add_argument("--lr", type=float, default=1e-5)
+    p.add_argument("--weight_decay", type=float, default=0.01)
+    p.add_argument("--steps", type=int, default=10_000)
+    p.add_argument("--batch_size", type=int, default=1)
+    p.add_argument("--num_workers", type=int, default=8)
+    p.add_argument("--accumulate_grad_batches", type=int, default=1)
+    p.add_argument("--gradient_clip_val", type=float, default=1.0)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--logger", choices=["wandb", "comet", "csv", "none"], default="csv")
+    p.add_argument("--name", default="diffusion-train")
+    p.add_argument("--save_dir", default="./training_runs")
+    p.add_argument("--checkpoint_every", type=int, default=500)
+    p.add_argument("--log_every", type=int, default=100)
+    p.add_argument("--export_path", default=None)
+    p.add_argument("--precision", default="bf16-mixed")
+    p.add_argument("--strategy", default="auto")
+    p.add_argument(
+        "--timestep_sampler",
+        choices=["uniform", "logit_normal", "trunc_logit_normal", "log_snr", "log_snr_uniform"],
+        default="trunc_logit_normal",
+    )
+    p.add_argument("--mask_loss_weight", type=float, default=1.0)
+    p.add_argument("--mask_padding_attention", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--silence_extension_scale_seconds", type=float, default=4.0)
+    p.add_argument("--use_effective_length_for_schedule", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--inpainting", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--use_ema", action=argparse.BooleanOptionalAction, default=False)
+    p.add_argument("--log_loss_info", action="store_true")
+    p.add_argument("--ot_coupling", action=argparse.BooleanOptionalAction, default=True)
+    args = p.parse_args()
+
+    train(args)
+
+
+if __name__ == "__main__":
+    main()

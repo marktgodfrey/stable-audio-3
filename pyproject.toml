@@ -30,6 +30,12 @@ lora = [
   "dill>=0.4.1",
 ]
 
+training = [
+  "pytorch_lightning==2.5.5",
+  "dill>=0.4.1",
+  "webdataset>=0.2.48",
+]
+
 [[tool.uv.index]]
 name = "pytorch-cu126"
 url = "https://download.pytorch.org/whl/cu126"
