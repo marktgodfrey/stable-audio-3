@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_dir="${REPO_DIR:-/Users/mark/code/stable-audio-3}"
+repo_dir="${REPO_DIR:-/root/sa3/stable-audio-3}"
 cd "$repo_dir"
 
-run_name="${RUN_NAME:-electronic100k-full-wds}"
-dataset_config="${DATASET_CONFIG:-$repo_dir/configs/electronic100k_wds.json}"
+run_name="${RUN_NAME:-sa3-instrumental750k}"
+dataset_config="${DATASET_CONFIG:-$repo_dir/configs/dataset_configs/instrumental750k.json}"
 model="${MODEL:-medium-base}"
 model_config="${MODEL_CONFIG:-}"
 checkpoint="${CHECKPOINT:-}"
