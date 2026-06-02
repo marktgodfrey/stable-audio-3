@@ -768,13 +768,17 @@ def finalize_row_metadata(row_context, chunk_metas, num_chunks, output_path, sam
     sample_records = []
 
     for meta in chunk_metas:
+        padding_mask_tensor = meta["padding_mask"]
+        if not isinstance(padding_mask_tensor, torch.Tensor):
+            padding_mask_tensor = torch.as_tensor(padding_mask_tensor, dtype=torch.float32)
+
         padding_mask = F.interpolate(
-            meta["padding_mask"].unsqueeze(0).unsqueeze(1),
+            padding_mask_tensor.unsqueeze(0).unsqueeze(1),
             size=meta["latent_length"],
             mode="nearest",
         ).squeeze(0).squeeze(0).int().cpu().numpy().tolist()
 
-        chunk_seconds = meta["padding_mask"].sum().item() / sample_rate
+        chunk_seconds = padding_mask_tensor.sum().item() / sample_rate
         t_start = meta["seconds_start"] / max(row_context["seconds_total"], 1e-6)
         t_end = min(1.0, (meta["seconds_start"] + chunk_seconds) / max(row_context["seconds_total"], 1e-6))
 
@@ -804,7 +808,7 @@ def finalize_row_metadata(row_context, chunk_metas, num_chunks, output_path, sam
         with open(metadata_path, "w") as f:
             json.dump(metadata, f)
 
-        npy_path = meta["latent_path"]
+        npy_path = Path(meta["latent_path"])
         sample_stem = f"{row_context['rel_base']}_{int(meta['chunk_idx']):03d}"
         sample_records.append(
             {
@@ -1041,6 +1045,16 @@ def maybe_set_cuda_device(device):
         torch.cuda.set_device(device)
 
 
+def meta_for_queue(meta, latent_path):
+    """Convert per-chunk metadata into queue-safe Python/NumPy objects."""
+    serialized = dict(meta)
+    padding_mask = serialized.get("padding_mask")
+    if isinstance(padding_mask, torch.Tensor):
+        serialized["padding_mask"] = padding_mask.cpu().numpy()
+    serialized["latent_path"] = str(latent_path)
+    return serialized
+
+
 def flush_gpu_worker_pending(gpu_pending, model, args, output_path, device, result_queue, runtime_stats=None):
     if not gpu_pending:
         return 0
@@ -1068,12 +1082,11 @@ def flush_gpu_worker_pending(gpu_pending, model, args, output_path, device, resu
         with open(latent_path, "wb") as f:
             np.save(f, latent)
         meta["latent_length"] = int(latent.shape[1])
-        meta["latent_path"] = latent_path
         result_queue.put(
             {
                 "type": "encoded",
                 "row_context": row_context,
-                "meta": meta,
+                "meta": meta_for_queue(meta, latent_path),
             }
         )
 
