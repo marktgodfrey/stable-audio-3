@@ -17,6 +17,7 @@ Dataset config example for S3 WebDataset shards:
 """
 
 import argparse
+import itertools
 import json
 import os
 
@@ -28,7 +29,7 @@ from stable_audio_3.data.dataset import create_dataloader_from_config
 from stable_audio_3.factory import create_diffusion_cond_from_config
 from stable_audio_3.loading_utils import copy_state_dict
 from stable_audio_3.model_configs import base_models
-from stable_audio_3.training.diffusion import DiffusionCondTrainingWrapper
+from stable_audio_3.training.diffusion import DiffusionCondInpaintDemoCallback, DiffusionCondTrainingWrapper
 
 
 class ExceptionCallback(pl.Callback):
@@ -81,13 +82,14 @@ def train(args):
     if dataset_config.get("pre_encoded", False) and dataset_config.get("latent_crop_length") is None:
         dataset_config["latent_crop_length"] = sample_size // ds_ratio
 
-    dataloader = create_dataloader_from_config(
+    dataloader, valid_dataloaders = create_dataloader_from_config(
         dataset_config,
         batch_size=args.batch_size,
         sample_size=sample_size,
         sample_rate=sample_rate,
         num_workers=args.num_workers,
         audio_channels=args.audio_channels,
+        return_valid=True,
     )
 
     optimizer_config = {
@@ -144,6 +146,50 @@ def train(args):
         pl.callbacks.ModelSummary(max_depth=2),
     ]
 
+    demo_config = model_config.get("training", {}).get("demo", {})
+    demo_every = args.demo_every if args.demo_every is not None else demo_config.get("demo_every", 500)
+    validation_every = (
+        args.validation_every
+        if args.validation_every is not None
+        else demo_every if demo_every and demo_every > 0 else args.checkpoint_every
+    )
+
+    if demo_every and demo_every > 0:
+        demo_source_loader = valid_dataloaders[0] if valid_dataloaders else dataloader
+        demo_batch = next(iter(demo_source_loader))
+        _, metadata = demo_batch
+
+        configured_num_demos = args.num_demos if args.num_demos is not None else demo_config.get("num_demos", 4)
+        num_demos = min(configured_num_demos, len(metadata))
+
+        for j in range(num_demos):
+            md = metadata[j]
+            print(
+                f"Demo sample {j}: prompt={md.get('prompt', '')} seconds_total={md.get('seconds_total', '')}"
+            )
+
+        callbacks.append(
+            DiffusionCondInpaintDemoCallback(
+                demo_every=demo_every,
+                sample_size=sample_size,
+                sample_rate=sample_rate,
+                demo_steps=args.demo_steps if args.demo_steps is not None else demo_config.get("demo_steps", 50),
+                num_demos=num_demos,
+                demo_cfg_scales=args.demo_cfg_scales or demo_config.get("demo_cfg_scales", [2, 4, 7]),
+                demo_conditioning=demo_config.get("demo_cond", []),
+                inpaint_demo_config=demo_config.get("inpaint_demo_config"),
+                demo_dl=itertools.cycle([demo_batch]),
+            )
+        )
+
+    trainer_kwargs = {}
+    run_validation = bool(valid_dataloaders) and validation_every and validation_every > 0
+    if run_validation:
+        trainer_kwargs.update(
+            check_val_every_n_epoch=None,
+            val_check_interval=validation_every,
+        )
+
     trainer = pl.Trainer(
         devices="auto",
         accelerator="auto",
@@ -157,9 +203,15 @@ def train(args):
         default_root_dir=args.save_dir,
         gradient_clip_val=args.gradient_clip_val or None,
         num_sanity_val_steps=0,
+        **trainer_kwargs,
     )
 
-    trainer.fit(training_wrapper, dataloader, ckpt_path=args.resume_from_checkpoint)
+    trainer.fit(
+        training_wrapper,
+        train_dataloaders=dataloader,
+        val_dataloaders=valid_dataloaders if run_validation else None,
+        ckpt_path=args.resume_from_checkpoint,
+    )
 
     if args.export_path:
         os.makedirs(os.path.dirname(args.export_path) or ".", exist_ok=True)
@@ -188,6 +240,11 @@ def main():
     p.add_argument("--save_dir", default="./training_runs")
     p.add_argument("--checkpoint_every", type=int, default=500)
     p.add_argument("--log_every", type=int, default=100)
+    p.add_argument("--demo_every", type=int, default=None)
+    p.add_argument("--demo_steps", type=int, default=None)
+    p.add_argument("--num_demos", type=int, default=None)
+    p.add_argument("--demo_cfg_scales", type=float, nargs="+", default=None)
+    p.add_argument("--validation_every", type=int, default=None)
     p.add_argument("--export_path", default=None)
     p.add_argument("--precision", default="bf16-mixed")
     p.add_argument("--strategy", default="auto")

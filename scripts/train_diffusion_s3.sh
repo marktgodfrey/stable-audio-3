@@ -43,6 +43,25 @@ if [[ ! -f "$dataset_config" ]]; then
   exit 1
 fi
 
+if "$python_bin" - "$dataset_config" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1]) as f:
+    config = json.load(f)
+
+if config.get("datasets_valid"):
+    print(f"[train] validation datasets: {len(config['datasets_valid'])}")
+else:
+    print("[train] validation datasets: none")
+PY
+then
+  :
+else
+  echo "[train] failed to inspect dataset config: $dataset_config" >&2
+  exit 1
+fi
+
 model_args=()
 if [[ -n "$model_config" ]]; then
   model_args+=(--model_config "$model_config")
@@ -67,6 +86,24 @@ if [[ -n "$export_path" ]]; then
   export_args+=(--export_path "$export_path")
 fi
 
+demo_args=()
+if [[ -n "${DEMO_EVERY:-}" ]]; then
+  demo_args+=(--demo_every "$DEMO_EVERY")
+fi
+if [[ -n "${DEMO_STEPS:-}" ]]; then
+  demo_args+=(--demo_steps "$DEMO_STEPS")
+fi
+if [[ -n "${NUM_DEMOS:-}" ]]; then
+  demo_args+=(--num_demos "$NUM_DEMOS")
+fi
+if [[ -n "${DEMO_CFG_SCALES:-}" ]]; then
+  read -r -a demo_cfg_scales <<< "$DEMO_CFG_SCALES"
+  demo_args+=(--demo_cfg_scales "${demo_cfg_scales[@]}")
+fi
+if [[ -n "${VALIDATION_EVERY:-}" ]]; then
+  demo_args+=(--validation_every "$VALIDATION_EVERY")
+fi
+
 "$python_bin" scripts/train_diffusion.py \
   "${model_args[@]}" \
   --dataset_config "$dataset_config" \
@@ -83,9 +120,10 @@ fi
   --gradient_clip_val "${GRADIENT_CLIP_VAL:-1.0}" \
   --checkpoint_every "${CHECKPOINT_EVERY:-500}" \
   --log_every "${LOG_EVERY:-100}" \
-  --logger "${LOGGER:-csv}" \
+  --logger "${LOGGER:-wandb}" \
   --precision "${PRECISION:-bf16-mixed}" \
   --strategy "${STRATEGY:-auto}" \
+  "${demo_args[@]}" \
   "${resume_args[@]}" \
   "${export_args[@]}" || status=$?
 

@@ -1002,6 +1002,7 @@ def create_dataloader_from_config(
     sample_rate,
     num_workers=4,
     audio_channels=2,
+    return_valid=False,
 ):
     dataset_type = dataset_config.get("dataset_type")
     if dataset_type is None:
@@ -1009,99 +1010,128 @@ def create_dataloader_from_config(
 
     force_channels = "mono" if audio_channels == 1 else "stereo"
 
+    def _with_valid(train_loader, build_loader):
+        if not return_valid:
+            return train_loader
+
+        valid_entries = dataset_config.get("datasets_valid", [])
+        if not valid_entries:
+            return train_loader, []
+
+        valid_config = dict(dataset_config)
+        valid_config["datasets"] = valid_entries
+        valid_config["random_crop"] = dataset_config.get("random_crop_valid", False)
+        valid_config["shuffle"] = dataset_config.get("shuffle_valid", False)
+        valid_config["drop_last"] = dataset_config.get("drop_last_valid", True)
+        if "epoch_steps_valid" in dataset_config:
+            valid_config["epoch_steps"] = dataset_config["epoch_steps_valid"]
+        if "resampled_shards_valid" in dataset_config:
+            valid_config["resampled_shards"] = dataset_config["resampled_shards_valid"]
+
+        return train_loader, [build_loader(valid_config)]
+
     if dataset_type == "audio_dir":
-        configs = [
-            LocalDatasetConfig(
-                id=entry["id"],
-                path=entry["path"],
-                keywords=entry.get("keywords"),
-                filelist_path=entry.get("filelist_path"),
-                weight=entry.get("weight", 1.0),
+        def build_audio_dir_loader(config):
+            configs = [
+                LocalDatasetConfig(
+                    id=entry["id"],
+                    path=entry["path"],
+                    keywords=entry.get("keywords"),
+                    filelist_path=entry.get("filelist_path"),
+                    weight=entry.get("weight", 1.0),
+                )
+                for entry in config.get("datasets", [])
+            ]
+            dataset = SampleDataset(
+                configs,
+                sample_size=sample_size,
+                sample_rate=sample_rate,
+                random_crop=config.get("random_crop", True),
+                force_channels=force_channels,
+                volume_norm=config.get("volume_norm", False),
+                volume_norm_param=tuple(config.get("volume_norm_param", (-16, 2))),
+                strip_silence=config.get("strip_silence", False),
+                pad=config.get("pad", True),
             )
-            for entry in dataset_config.get("datasets", [])
-        ]
-        dataset = SampleDataset(
-            configs,
-            sample_size=sample_size,
-            sample_rate=sample_rate,
-            random_crop=dataset_config.get("random_crop", True),
-            force_channels=force_channels,
-            volume_norm=dataset_config.get("volume_norm", False),
-            volume_norm_param=tuple(dataset_config.get("volume_norm_param", (-16, 2))),
-            strip_silence=dataset_config.get("strip_silence", False),
-            pad=dataset_config.get("pad", True),
-        )
-        return torch.utils.data.DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=dataset_config.get("shuffle", True),
-            num_workers=num_workers,
-            drop_last=dataset_config.get("drop_last", True),
-            collate_fn=collation_fn,
-        )
+            return torch.utils.data.DataLoader(
+                dataset,
+                batch_size=batch_size,
+                shuffle=config.get("shuffle", True),
+                num_workers=num_workers,
+                drop_last=config.get("drop_last", True),
+                collate_fn=collation_fn,
+            )
+
+        return _with_valid(build_audio_dir_loader(dataset_config), build_audio_dir_loader)
 
     if dataset_type == "pre_encoded":
-        configs = [
-            LatentDatasetConfig(
-                id=entry["id"],
-                path=entry["path"],
-                latent_extension=entry.get("latent_extension", dataset_config.get("latent_extension", "npy")),
-                filelist_path=entry.get("filelist_path"),
-                weight=entry.get("weight", 1.0),
+        def build_pre_encoded_loader(config):
+            configs = [
+                LatentDatasetConfig(
+                    id=entry["id"],
+                    path=entry["path"],
+                    latent_extension=entry.get("latent_extension", config.get("latent_extension", "npy")),
+                    filelist_path=entry.get("filelist_path"),
+                    weight=entry.get("weight", 1.0),
+                )
+                for entry in config.get("datasets", [])
+            ]
+            dataset = PreEncodedDataset(
+                configs,
+                latent_crop_length=config.get("latent_crop_length"),
+                min_length_sec=config.get("min_length_sec"),
+                max_length_sec=config.get("max_length_sec"),
+                random_crop=config.get("random_crop", False),
             )
-            for entry in dataset_config.get("datasets", [])
-        ]
-        dataset = PreEncodedDataset(
-            configs,
-            latent_crop_length=dataset_config.get("latent_crop_length"),
-            min_length_sec=dataset_config.get("min_length_sec"),
-            max_length_sec=dataset_config.get("max_length_sec"),
-            random_crop=dataset_config.get("random_crop", False),
-        )
-        return torch.utils.data.DataLoader(
-            dataset,
-            batch_size=batch_size,
-            shuffle=dataset_config.get("shuffle", True),
-            num_workers=num_workers,
-            drop_last=dataset_config.get("drop_last", True),
-            collate_fn=collation_fn,
-        )
+            return torch.utils.data.DataLoader(
+                dataset,
+                batch_size=batch_size,
+                shuffle=config.get("shuffle", True),
+                num_workers=num_workers,
+                drop_last=config.get("drop_last", True),
+                collate_fn=collation_fn,
+            )
+
+        return _with_valid(build_pre_encoded_loader(dataset_config), build_pre_encoded_loader)
 
     if dataset_type in ("s3", "wds"):
-        configs = []
-        s3_streaming_defaults = dataset_config.get("s3_streaming", {})
-        for entry in dataset_config.get("datasets", []):
-            if dataset_type == "s3":
-                s3_streaming_config = dict(s3_streaming_defaults)
-                s3_streaming_config.update(entry.get("s3_streaming", {}))
-                configs.append(
-                    S3DatasetConfig(
-                        id=entry["id"],
-                        s3_path=entry["s3_path"],
-                        profile=entry.get("profile"),
-                        s3_streaming_config=s3_streaming_config,
+        def build_webdataset_loader(config):
+            configs = []
+            s3_streaming_defaults = config.get("s3_streaming", {})
+            for entry in config.get("datasets", []):
+                if dataset_type == "s3":
+                    s3_streaming_config = dict(s3_streaming_defaults)
+                    s3_streaming_config.update(entry.get("s3_streaming", {}))
+                    configs.append(
+                        S3DatasetConfig(
+                            id=entry["id"],
+                            s3_path=entry["s3_path"],
+                            profile=entry.get("profile"),
+                            s3_streaming_config=s3_streaming_config,
+                        )
                     )
-                )
-            else:
-                configs.append(LocalWebDatasetConfig(id=entry["id"], path=entry["path"]))
+                else:
+                    configs.append(LocalWebDatasetConfig(id=entry["id"], path=entry["path"]))
 
-        pre_encoded = dataset_config.get("pre_encoded", False)
-        return WebDatasetDataLoader(
-            configs,
-            batch_size=batch_size,
-            sample_size=sample_size,
-            sample_rate=sample_rate,
-            num_workers=num_workers,
-            epoch_steps=dataset_config.get("epoch_steps", 2000),
-            random_crop=dataset_config.get("random_crop", True),
-            force_channels=force_channels,
-            pre_encoded=pre_encoded,
-            latent_crop_length=dataset_config.get("latent_crop_length"),
-            latent_extension=dataset_config.get("latent_extension", "npy"),
-            min_length_sec=dataset_config.get("min_length_sec"),
-            max_length_sec=dataset_config.get("max_length_sec"),
-            resampled_shards=dataset_config.get("resampled_shards", True),
-        )
+            pre_encoded = config.get("pre_encoded", False)
+            return WebDatasetDataLoader(
+                configs,
+                batch_size=batch_size,
+                sample_size=sample_size,
+                sample_rate=sample_rate,
+                num_workers=num_workers,
+                epoch_steps=config.get("epoch_steps", 2000),
+                random_crop=config.get("random_crop", True),
+                force_channels=force_channels,
+                pre_encoded=pre_encoded,
+                latent_crop_length=config.get("latent_crop_length"),
+                latent_extension=config.get("latent_extension", "npy"),
+                min_length_sec=config.get("min_length_sec"),
+                max_length_sec=config.get("max_length_sec"),
+                resampled_shards=config.get("resampled_shards", True),
+            )
+
+        return _with_valid(build_webdataset_loader(dataset_config), build_webdataset_loader)
 
     raise ValueError(f"Unknown dataset_type: {dataset_type}")
 
