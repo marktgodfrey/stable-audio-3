@@ -688,12 +688,34 @@ class DiffusionCondInpaintDemoCallback(pl.Callback):
                 self.inpaint_demo_config.get(k, 0) for k in self._mask_type_map
             )
 
-        if demo_dl is not None:
-            self.demo_dl = iter(demo_dl)
-        else:
-            self.demo_dl = None
+        self.demo_dl = demo_dl
+        self.demo_iter = None
+        self.demo_batch = None
+        self._logged_demo_samples = False
 
         self._teacher_demo_done = False
+
+    def _get_demo_batch(self, is_rank_zero=True):
+        if self.demo_dl is None:
+            return None
+
+        if self.demo_batch is None:
+            if self.demo_iter is None:
+                self.demo_iter = iter(self.demo_dl)
+            self.demo_batch = next(self.demo_iter)
+
+            if is_rank_zero and not self._logged_demo_samples:
+                _, metadata = self.demo_batch
+                for j, md in enumerate(metadata[:self.num_inpaint_demos]):
+                    print(
+                        "Demo sample "
+                        f"{j}: prompt={md.get('prompt', '')} "
+                        f"tempo={md.get('tempo', '')} "
+                        f"normalized_track_position={md.get('normalized_track_position', '')}"
+                    )
+                self._logged_demo_samples = True
+
+        return self.demo_batch
 
     def _generate_prompt_demos(self, module, trainer, is_rank_zero=True):
         """Generate full t2m demos from specified prompts (FULL_MASK)."""
@@ -776,13 +798,18 @@ class DiffusionCondInpaintDemoCallback(pl.Callback):
         if self.num_inpaint_demos == 0 or self.demo_dl is None:
             return [], []
 
-        demo_reals, metadata = next(self.demo_dl)
+        demo_batch = self._get_demo_batch(is_rank_zero)
+        if demo_batch is None:
+            return [], []
+
+        demo_reals, metadata = demo_batch
 
         if demo_reals.ndim == 4 and demo_reals.shape[0] == 1:
             demo_reals = demo_reals[0]
 
-        demo_reals = demo_reals[:self.num_inpaint_demos]
-        metadata = metadata[:self.num_inpaint_demos]
+        num_available = min(self.num_inpaint_demos, demo_reals.shape[0], len(metadata))
+        demo_reals = demo_reals[:num_available]
+        metadata = metadata[:num_available]
         model_dtype = next(module.diffusion.parameters()).dtype
         demo_reals = demo_reals.to(module.device, dtype=model_dtype)
 
@@ -812,7 +839,7 @@ class DiffusionCondInpaintDemoCallback(pl.Callback):
             all_masked_inputs = []
             idx = 0
             for config_key, mask_type in self._mask_type_map.items():
-                count = self.inpaint_demo_config.get(config_key, 0)
+                count = min(self.inpaint_demo_config.get(config_key, 0), demo_reals.shape[0] - idx)
                 if count == 0:
                     continue
                 subset_reals = demo_reals[idx:idx+count]
@@ -1018,11 +1045,15 @@ class DiffusionCondInpaintDemoCallback(pl.Callback):
 
                     if self.num_inpaint_demos > 0 and self.demo_dl is not None:
                         try:
-                            inpaint_reals, inpaint_metadata = next(self.demo_dl)
+                            demo_batch = self._get_demo_batch(is_rank_zero)
+                            if demo_batch is None:
+                                raise RuntimeError("no demo batch available")
+                            inpaint_reals, inpaint_metadata = demo_batch
                             if inpaint_reals.ndim == 4 and inpaint_reals.shape[0] == 1:
                                 inpaint_reals = inpaint_reals[0]
-                            inpaint_reals = inpaint_reals[:self.num_inpaint_demos]
-                            inpaint_metadata = inpaint_metadata[:self.num_inpaint_demos]
+                            num_available = min(self.num_inpaint_demos, inpaint_reals.shape[0], len(inpaint_metadata))
+                            inpaint_reals = inpaint_reals[:num_available]
+                            inpaint_metadata = inpaint_metadata[:num_available]
                             inpaint_reals = inpaint_reals.to(module.device)
 
                             if not module.pre_encoded:

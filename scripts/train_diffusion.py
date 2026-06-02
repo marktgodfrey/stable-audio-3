@@ -17,7 +17,6 @@ Dataset config example for S3 WebDataset shards:
 """
 
 import argparse
-import itertools
 import json
 import os
 
@@ -35,10 +34,6 @@ from stable_audio_3.training.diffusion import DiffusionCondInpaintDemoCallback, 
 class ExceptionCallback(pl.Callback):
     def on_exception(self, trainer, module, err):
         print(f"{type(err).__name__}: {err}")
-
-
-def is_rank_zero_process():
-    return int(os.environ.get("RANK", os.environ.get("GLOBAL_RANK", "0"))) == 0
 
 
 def load_model(model_name, model_config_path, checkpoint_path, device):
@@ -160,26 +155,7 @@ def train(args):
 
     if demo_every and demo_every > 0:
         configured_num_demos = args.num_demos if args.num_demos is not None else demo_config.get("num_demos", 4)
-        demo_dl = None
-        num_demos = configured_num_demos
-
-        if is_rank_zero_process():
-            demo_source_loader = valid_dataloaders[0] if valid_dataloaders else dataloader
-            demo_batch = next(iter(demo_source_loader))
-            _, metadata = demo_batch
-
-            num_demos = min(configured_num_demos, len(metadata))
-
-            for j in range(num_demos):
-                md = metadata[j]
-                print(
-                    "Demo sample "
-                    f"{j}: prompt={md.get('prompt', '')} "
-                    f"tempo={md.get('tempo', '')} "
-                    f"normalized_track_position={md.get('normalized_track_position', '')}"
-                )
-
-            demo_dl = itertools.cycle([demo_batch])
+        demo_source_loader = valid_dataloaders[0] if valid_dataloaders else dataloader
 
         callbacks.append(
             DiffusionCondInpaintDemoCallback(
@@ -187,11 +163,11 @@ def train(args):
                 sample_size=sample_size,
                 sample_rate=sample_rate,
                 demo_steps=args.demo_steps if args.demo_steps is not None else demo_config.get("demo_steps", 50),
-                num_demos=num_demos,
+                num_demos=configured_num_demos,
                 demo_cfg_scales=args.demo_cfg_scales or demo_config.get("demo_cfg_scales", [2, 4, 7]),
                 demo_conditioning=demo_config.get("demo_cond", []),
                 inpaint_demo_config=demo_config.get("inpaint_demo_config"),
-                demo_dl=demo_dl,
+                demo_dl=demo_source_loader,
             )
         )
 
