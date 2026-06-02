@@ -551,6 +551,8 @@ class DiffusionCondTrainingWrapper(pl.LightningModule):
         log_dict["train/mse_loss"] = mse_loss.detach()
         log_dict["train/loss"] = loss.detach()
 
+        self.log("global_step", self.global_step, on_step=True, on_epoch=False, logger=False)
+
         # Stash for external callbacks (e.g. loss-by-timestep logging)
         self._last_t = t.detach()
         self._last_per_elem_loss = mse_loss_full.detach().mean(dim=(1, 2))

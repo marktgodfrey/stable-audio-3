@@ -118,7 +118,9 @@ fi
   --weight_decay "${WEIGHT_DECAY:-0.01}" \
   --accumulate_grad_batches "${ACCUMULATE_GRAD_BATCHES:-1}" \
   --gradient_clip_val "${GRADIENT_CLIP_VAL:-1.0}" \
-  --checkpoint_every "${CHECKPOINT_EVERY:-500}" \
+  --checkpoint_every "${CHECKPOINT_EVERY:-50000}" \
+  --save_top_k "${SAVE_TOP_K:-10}" \
+  --checkpoint_time_interval_minutes "${CHECKPOINT_TIME_INTERVAL_MINUTES:-60}" \
   --log_every "${LOG_EVERY:-100}" \
   --logger "${LOGGER:-wandb}" \
   --precision "${PRECISION:-bf16-mixed}" \

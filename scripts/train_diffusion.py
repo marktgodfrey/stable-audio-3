@@ -19,6 +19,7 @@ Dataset config example for S3 WebDataset shards:
 import argparse
 import json
 import os
+from datetime import timedelta
 
 import pytorch_lightning as pl
 import torch
@@ -135,15 +136,27 @@ def train(args):
         logger = pl.loggers.CSVLogger(args.save_dir, name=args.name)
 
     checkpoint_dir = os.path.join(args.save_dir, args.name, "checkpoints")
+    ckpt_callback = pl.callbacks.ModelCheckpoint(
+        every_n_train_steps=args.checkpoint_every,
+        dirpath=checkpoint_dir,
+        save_top_k=args.save_top_k,
+        monitor="global_step",
+        mode="max",
+    )
+
     callbacks = [
-        pl.callbacks.ModelCheckpoint(
-            every_n_train_steps=args.checkpoint_every,
-            dirpath=checkpoint_dir,
-            save_top_k=-1,
-        ),
+        ckpt_callback,
         ExceptionCallback(),
         pl.callbacks.ModelSummary(max_depth=2),
     ]
+
+    if args.checkpoint_time_interval_minutes > 0:
+        timed_ckpt_callback = pl.callbacks.ModelCheckpoint(
+            train_time_interval=timedelta(minutes=args.checkpoint_time_interval_minutes),
+            dirpath=checkpoint_dir,
+            save_last="link",
+        )
+        callbacks.append(timed_ckpt_callback)
 
     demo_config = model_config.get("training", {}).get("demo", {})
     demo_every = args.demo_every if args.demo_every is not None else demo_config.get("demo_every", 500)
@@ -228,6 +241,8 @@ def main():
     p.add_argument("--name", default="diffusion-train")
     p.add_argument("--save_dir", default="./training_runs")
     p.add_argument("--checkpoint_every", type=int, default=500)
+    p.add_argument("--save_top_k", type=int, default=10)
+    p.add_argument("--checkpoint_time_interval_minutes", type=int, default=60)
     p.add_argument("--log_every", type=int, default=100)
     p.add_argument("--demo_every", type=int, default=None)
     p.add_argument("--demo_steps", type=int, default=None)
