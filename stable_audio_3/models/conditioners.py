@@ -12,6 +12,23 @@ from .blocks import ExpoFourierFeatures
 from .utils import enable_torch_compile
 import os
 
+
+def is_null_conditioning_value(value: tp.Any) -> bool:
+    if value is None:
+        return True
+
+    if torch.is_tensor(value):
+        return bool(value.numel() == 0)
+
+    if isinstance(value, str):
+        return value.strip().lower() in {"", "none", "null", "nan"}
+
+    try:
+        return bool(value != value)
+    except TypeError:
+        return False
+
+
 class PaddingMode(str, Enum):
     """Enum for handling padding in text conditioner embeddings."""
     NONE = "none"       # No padding handling (raw embeddings with pad token)
@@ -137,9 +154,16 @@ class NumberConditioner(Conditioner):
 
     def forward(self, floats: tp.List[float], device=None) -> tp.Any:
             self.embedder.to(device)
+
+            valid_mask = torch.tensor(
+                [not is_null_conditioning_value(x) for x in floats],
+                device=device,
+                dtype=torch.float32,
+            )
+            floats = [self.min_val if is_null_conditioning_value(x) else x for x in floats]
+
             # Cast the inputs to floats
             floats = [float(x) for x in floats]
-
             floats = torch.tensor(floats).to(device)
 
             floats = floats.clamp(self.min_val, self.max_val)
@@ -151,8 +175,9 @@ class NumberConditioner(Conditioner):
             normalized_floats = normalized_floats.to(embedder_dtype)
 
             float_embeds = self.embedder(normalized_floats).unsqueeze(1)
+            float_embeds = float_embeds * valid_mask.to(float_embeds.dtype).view(-1, 1, 1)
     
-            return [float_embeds, torch.ones(float_embeds.shape[0], 1).to(device)]
+            return [float_embeds, valid_mask.view(-1, 1)]
 
 class T5GemmaConditioner(Conditioner):
 
@@ -297,6 +322,9 @@ class MultiConditioner(nn.Module):
                 if condition_key not in x:
                     if condition_key in self.default_keys:
                         condition_key = self.default_keys[condition_key]
+                    elif isinstance(conditioner, NumberConditioner):
+                        conditioner_inputs.append(None)
+                        continue
                     else:
                         raise ValueError(f"Conditioner key {condition_key} not found in batch metadata")
 
