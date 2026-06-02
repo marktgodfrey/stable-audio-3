@@ -543,6 +543,13 @@ class Attention(nn.Module):
         
         self.num_heads = dim // dim_heads
         self.kv_heads = dim_kv // dim_heads
+        if self.num_heads % self.kv_heads != 0:
+            raise ValueError(
+                "Attention key/value heads must divide query heads. "
+                f"Got query_heads={self.num_heads}, kv_heads={self.kv_heads}, "
+                f"dim={dim}, dim_context={dim_context}, dim_heads={dim_heads}. "
+                "For cross-attention, set project_cond_tokens=true or choose compatible head dimensions."
+            )
 
         if dim_context is not None:
             if differential:
