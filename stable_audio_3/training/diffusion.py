@@ -898,6 +898,9 @@ class DiffusionCondInpaintDemoCallback(pl.Callback):
             return
 
         is_rank_zero = get_rank() == 0
+        if not is_rank_zero:
+            self.last_demo_step = trainer.global_step
+            return
 
         module.eval()
 

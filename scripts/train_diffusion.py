@@ -37,6 +37,10 @@ class ExceptionCallback(pl.Callback):
         print(f"{type(err).__name__}: {err}")
 
 
+def is_rank_zero_process():
+    return int(os.environ.get("RANK", os.environ.get("GLOBAL_RANK", "0"))) == 0
+
+
 def load_model(model_name, model_config_path, checkpoint_path, device):
     if model_name is not None:
         if model_name not in base_models:
@@ -155,18 +159,27 @@ def train(args):
     )
 
     if demo_every and demo_every > 0:
-        demo_source_loader = valid_dataloaders[0] if valid_dataloaders else dataloader
-        demo_batch = next(iter(demo_source_loader))
-        _, metadata = demo_batch
-
         configured_num_demos = args.num_demos if args.num_demos is not None else demo_config.get("num_demos", 4)
-        num_demos = min(configured_num_demos, len(metadata))
+        demo_dl = None
+        num_demos = configured_num_demos
 
-        for j in range(num_demos):
-            md = metadata[j]
-            print(
-                f"Demo sample {j}: prompt={md.get('prompt', '')} seconds_total={md.get('seconds_total', '')}"
-            )
+        if is_rank_zero_process():
+            demo_source_loader = valid_dataloaders[0] if valid_dataloaders else dataloader
+            demo_batch = next(iter(demo_source_loader))
+            _, metadata = demo_batch
+
+            num_demos = min(configured_num_demos, len(metadata))
+
+            for j in range(num_demos):
+                md = metadata[j]
+                print(
+                    "Demo sample "
+                    f"{j}: prompt={md.get('prompt', '')} "
+                    f"tempo={md.get('tempo', '')} "
+                    f"normalized_track_position={md.get('normalized_track_position', '')}"
+                )
+
+            demo_dl = itertools.cycle([demo_batch])
 
         callbacks.append(
             DiffusionCondInpaintDemoCallback(
@@ -178,7 +191,7 @@ def train(args):
                 demo_cfg_scales=args.demo_cfg_scales or demo_config.get("demo_cfg_scales", [2, 4, 7]),
                 demo_conditioning=demo_config.get("demo_cond", []),
                 inpaint_demo_config=demo_config.get("inpaint_demo_config"),
-                demo_dl=itertools.cycle([demo_batch]),
+                demo_dl=demo_dl,
             )
         )
 
