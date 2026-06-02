@@ -575,12 +575,12 @@ class PreEncodedDataset(torch.utils.data.Dataset):
 
             info["padding_mask"] = [torch.tensor(info["padding_mask"])]
 
-            seconds_total = info["seconds_total"]
+            seconds_total = info.get("seconds_total")
 
-            if self.min_length_sec is not None and seconds_total < self.min_length_sec:
+            if seconds_total is not None and self.min_length_sec is not None and seconds_total < self.min_length_sec:
                 return self[random.randrange(len(self))]
 
-            if self.max_length_sec is not None and seconds_total > self.max_length_sec:
+            if seconds_total is not None and self.max_length_sec is not None and seconds_total > self.max_length_sec:
                 return self[random.randrange(len(self))]
 
             for custom_md_path in self.custom_metadata_fns.keys():
