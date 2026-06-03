@@ -9,13 +9,17 @@ dataset_config="${DATASET_CONFIG:-$repo_dir/configs/dataset_configs/instrumental
 model="${MODEL:-medium-base}"
 model_config="${MODEL_CONFIG:-}"
 checkpoint="${CHECKPOINT:-}"
-resume_ckpt="${RESUME_CKPT:-$repo_dir/training_runs/$run_name/checkpoints/last.ckpt}"
 save_dir="${SAVE_DIR:-$repo_dir/training_runs}"
+resume_ckpt="${RESUME_CKPT:-$save_dir/$run_name/checkpoints/last.ckpt}"
 export_path="${EXPORT_PATH:-}"
 python_bin="${PYTHON_BIN:-python3}"
 
-unset WANDB_RUN_ID
-unset WANDB_RESUME
+if [[ -n "${WANDB_RUN_ID:-}" ]]; then
+  export WANDB_RESUME="${WANDB_RESUME:-allow}"
+else
+  unset WANDB_RUN_ID
+  unset WANDB_RESUME
+fi
 export WANDB_NAME="${WANDB_NAME:-$run_name}"
 export PYTHONUNBUFFERED=1
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
