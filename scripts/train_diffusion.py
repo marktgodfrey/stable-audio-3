@@ -37,7 +37,7 @@ class ExceptionCallback(pl.Callback):
         print(f"{type(err).__name__}: {err}")
 
 
-def load_model(model_name, model_config_path, checkpoint_path, device):
+def load_model(model_name, model_config_path, checkpoint_path):
     if model_name is not None:
         if model_name not in base_models:
             raise ValueError(f"Unknown model '{model_name}', valid: {list(base_models)}")
@@ -55,7 +55,7 @@ def load_model(model_name, model_config_path, checkpoint_path, device):
     if checkpoint_path is not None:
         copy_state_dict(model, load_file(checkpoint_path))
 
-    model.to(device=device).train()
+    model.train()
     return model, model_config
 
 
@@ -64,12 +64,10 @@ def train(args):
     torch.set_float32_matmul_precision("high")
     pl.seed_everything(args.seed, workers=True)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, model_config = load_model(
         args.model,
         args.model_config,
         args.checkpoint,
-        device,
     )
 
     sample_rate = model_config.get("sample_rate", getattr(model, "sample_rate", 44100))
