@@ -42,7 +42,6 @@ echo "[train] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "[train] repo_dir=$repo_dir"
 echo "[train] run_name=$run_name"
 echo "[train] dataset_config=$dataset_config"
-echo "[train] model=$model"
 echo "[train] init_from_pretrained=$init_from_pretrained"
 
 if [[ ! -f "$dataset_config" ]]; then
@@ -71,8 +70,10 @@ fi
 
 model_args=()
 if [[ -n "$model_config" ]]; then
+  echo "[train] model_config=$model_config"
   model_args+=(--model_config "$model_config")
 else
+  echo "[train] model=$model"
   model_args+=(--model "$model")
 fi
 
