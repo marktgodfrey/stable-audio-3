@@ -117,7 +117,7 @@ def train(args):
         return_valid=True,
     )
 
-    optimizer_config = training_config.get("optimizer_configs") if args.use_model_optimizer_config else None
+    optimizer_config = None if args.ignore_model_optimizer_config else training_config.get("optimizer_configs")
     if optimizer_config is not None:
         optimizer_config = copy.deepcopy(optimizer_config)
     else:
@@ -266,7 +266,7 @@ def main():
     p.add_argument("--audio_channels", type=int, choices=[1, 2], default=2)
     p.add_argument("--lr", type=float, default=1e-5)
     p.add_argument("--weight_decay", type=float, default=0.01)
-    p.add_argument("--use_model_optimizer_config", action="store_true")
+    p.add_argument("--ignore_model_optimizer_config", action="store_true")
     p.add_argument("--steps", type=int, default=10_000)
     p.add_argument("--batch_size", type=int, default=1)
     p.add_argument("--num_workers", type=int, default=8)

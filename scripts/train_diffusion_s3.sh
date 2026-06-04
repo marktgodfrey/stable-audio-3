@@ -99,6 +99,14 @@ if [[ -n "$export_path" ]]; then
   export_args+=(--export_path "$export_path")
 fi
 
+optimizer_args=()
+if [[ "${IGNORE_MODEL_OPTIMIZER_CONFIG:-false}" == "1" || "${IGNORE_MODEL_OPTIMIZER_CONFIG:-false}" == "true" || "${IGNORE_MODEL_OPTIMIZER_CONFIG:-false}" == "yes" ]]; then
+  echo "[train] optimizer_config=ignored"
+  optimizer_args+=(--ignore_model_optimizer_config)
+else
+  echo "[train] optimizer_config=model_config_if_present"
+fi
+
 demo_args=()
 if [[ -n "${DEMO_EVERY:-}" ]]; then
   demo_args+=(--demo_every "$DEMO_EVERY")
@@ -139,6 +147,7 @@ fi
   --precision "${PRECISION:-bf16-mixed}" \
   --strategy "${STRATEGY:-auto}" \
   "${demo_args[@]}" \
+  "${optimizer_args[@]}" \
   "${resume_args[@]}" \
   "${export_args[@]}" || status=$?
 
