@@ -711,12 +711,9 @@ class PreEncodedDataset(torch.utils.data.Dataset):
                 stored_length = latents.shape[1]
 
                 if stored_length > self.latent_crop_length:
-                    # Crop to latent_crop_length (existing logic)
-                    # Get the last index from the padding mask, the index of the last 1 in the sequence
-                    last_ix = len(info["padding_mask"]) - 1 - info["padding_mask"][::-1].index(1)
-
-                    if self.random_crop and last_ix > self.latent_crop_length:
-                        start = random.randint(0, last_ix - self.latent_crop_length)
+                    max_start = stored_length - self.latent_crop_length
+                    if self.random_crop and max_start > 0:
+                        start = random.randint(0, max_start)
                     else:
                         start = 0
 
@@ -1047,9 +1044,9 @@ class WebDatasetDataLoader:
             padding_mask = info.get("padding_mask", [1] * stored_length)
 
             if stored_length > self.latent_crop_length:
-                last_ix = len(padding_mask) - 1 - padding_mask[::-1].index(1)
-                if self.random_crop and last_ix > self.latent_crop_length:
-                    start = random.randint(0, last_ix - self.latent_crop_length)
+                max_start = stored_length - self.latent_crop_length
+                if self.random_crop and max_start > 0:
+                    start = random.randint(0, max_start)
                 else:
                     start = 0
                 latents = latents[:, start : start + self.latent_crop_length]
