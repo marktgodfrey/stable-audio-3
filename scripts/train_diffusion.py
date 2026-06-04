@@ -17,6 +17,7 @@ Dataset config example for S3 WebDataset shards:
 """
 
 import argparse
+import copy
 import json
 import os
 from datetime import timedelta
@@ -37,13 +38,14 @@ class ExceptionCallback(pl.Callback):
         print(f"{type(err).__name__}: {err}")
 
 
-def load_model(model_name, model_config_path, checkpoint_path):
+def load_model(model_name, model_config_path, checkpoint_path, init_from_pretrained=True):
     if model_name is not None:
         if model_name not in base_models:
             raise ValueError(f"Unknown model '{model_name}', valid: {list(base_models)}")
         resolved_config, resolved_checkpoint = base_models[model_name].resolve()
         model_config_path = model_config_path or resolved_config
-        checkpoint_path = checkpoint_path or resolved_checkpoint
+        if init_from_pretrained:
+            checkpoint_path = checkpoint_path or resolved_checkpoint
 
     if model_config_path is None:
         raise ValueError("Provide --model or --model_config")
@@ -68,6 +70,31 @@ def train(args):
         args.model,
         args.model_config,
         args.checkpoint,
+        args.init_from_pretrained,
+    )
+    training_config = model_config.get("training", {})
+    use_ema = args.use_ema if args.use_ema is not None else training_config.get("use_ema", False)
+    timestep_sampler = (
+        args.timestep_sampler
+        if args.timestep_sampler is not None
+        else training_config.get("timestep_sampler", "trunc_logit_normal")
+    )
+    mask_loss_weight = (
+        args.mask_loss_weight
+        if args.mask_loss_weight is not None
+        else training_config.get("mask_loss_weight", 1.0)
+    )
+    silence_extension_scale_seconds = (
+        args.silence_extension_scale_seconds
+        if args.silence_extension_scale_seconds is not None
+        else training_config.get("silence_extension_scale_seconds", 4.0)
+    )
+    ot_coupling = args.ot_coupling if args.ot_coupling is not None else training_config.get("ot_coupling", True)
+    inpainting_enabled = args.inpainting if args.inpainting is not None else bool(training_config.get("inpainting"))
+    log_loss_info = (
+        args.log_loss_info
+        if args.log_loss_info is not None
+        else training_config.get("log_loss_info", False)
     )
 
     sample_rate = model_config.get("sample_rate", getattr(model, "sample_rate", 44100))
@@ -90,38 +117,42 @@ def train(args):
         return_valid=True,
     )
 
-    optimizer_config = {
-        "diffusion": {
-            "optimizer": {
-                "type": "AdamW",
-                "config": {
-                    "lr": args.lr,
-                    "weight_decay": args.weight_decay,
-                    "betas": [0.9, 0.95],
-                },
+    optimizer_config = training_config.get("optimizer_configs")
+    if optimizer_config is not None:
+        optimizer_config = copy.deepcopy(optimizer_config)
+    else:
+        optimizer_config = {
+            "diffusion": {
+                "optimizer": {
+                    "type": "AdamW",
+                    "config": {
+                        "lr": args.lr,
+                        "weight_decay": args.weight_decay,
+                        "betas": [0.9, 0.95],
+                    },
+                }
             }
         }
-    }
 
     training_wrapper = DiffusionCondTrainingWrapper(
         model,
-        mask_loss_weight=args.mask_loss_weight,
+        mask_loss_weight=mask_loss_weight,
         mask_padding_attention=args.mask_padding_attention,
-        silence_extension_scale_seconds=args.silence_extension_scale_seconds,
-        use_ema=args.use_ema,
-        log_loss_info=args.log_loss_info,
+        silence_extension_scale_seconds=silence_extension_scale_seconds,
+        use_ema=use_ema,
+        log_loss_info=log_loss_info,
         optimizer_configs=optimizer_config,
         pre_encoded=dataset_config.get("pre_encoded", False),
-        timestep_sampler=args.timestep_sampler,
+        timestep_sampler=timestep_sampler,
         timestep_sampler_options={},
         inpainting_config={"mask_kwargs": {"mask_type_probabilities": [0.1, 0.8, 0.1]}}
-        if args.inpainting
+        if inpainting_enabled
         else None,
         use_effective_length_for_schedule=args.use_effective_length_for_schedule,
         sample_rate=sample_rate,
         sample_size=sample_size,
         log_every_n_steps=args.log_every,
-        ot_coupling=args.ot_coupling,
+        ot_coupling=ot_coupling,
     )
 
     logger = None
@@ -156,7 +187,7 @@ def train(args):
         )
         callbacks.append(timed_ckpt_callback)
 
-    demo_config = model_config.get("training", {}).get("demo", {})
+    demo_config = training_config.get("demo", {})
     demo_every = args.demo_every if args.demo_every is not None else demo_config.get("demo_every", 500)
     validation_every = (
         args.validation_every
@@ -223,6 +254,12 @@ def main():
     p.add_argument("--model", choices=list(base_models), default=None)
     p.add_argument("--model_config", default=None)
     p.add_argument("--checkpoint", default=None)
+    p.add_argument(
+        "--init_from_pretrained",
+        "--init-from-pretrained",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
     p.add_argument("--resume_from_checkpoint", default=None)
     p.add_argument("--dataset_config", required=True)
     p.add_argument("--duration", type=float, default=380.0)
@@ -253,16 +290,16 @@ def main():
     p.add_argument(
         "--timestep_sampler",
         choices=["uniform", "logit_normal", "trunc_logit_normal", "log_snr", "log_snr_uniform"],
-        default="trunc_logit_normal",
+        default=None,
     )
-    p.add_argument("--mask_loss_weight", type=float, default=1.0)
+    p.add_argument("--mask_loss_weight", type=float, default=None)
     p.add_argument("--mask_padding_attention", action=argparse.BooleanOptionalAction, default=True)
-    p.add_argument("--silence_extension_scale_seconds", type=float, default=4.0)
+    p.add_argument("--silence_extension_scale_seconds", type=float, default=None)
     p.add_argument("--use_effective_length_for_schedule", action=argparse.BooleanOptionalAction, default=True)
-    p.add_argument("--inpainting", action=argparse.BooleanOptionalAction, default=True)
-    p.add_argument("--use_ema", action=argparse.BooleanOptionalAction, default=False)
-    p.add_argument("--log_loss_info", action="store_true")
-    p.add_argument("--ot_coupling", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--inpainting", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--use_ema", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--log_loss_info", action=argparse.BooleanOptionalAction, default=None)
+    p.add_argument("--ot_coupling", action=argparse.BooleanOptionalAction, default=None)
     args = p.parse_args()
 
     train(args)

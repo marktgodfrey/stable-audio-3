@@ -9,6 +9,7 @@ dataset_config="${DATASET_CONFIG:-$repo_dir/configs/dataset_configs/instrumental
 model="${MODEL:-medium-base}"
 model_config="${MODEL_CONFIG:-}"
 checkpoint="${CHECKPOINT:-}"
+init_from_pretrained="${INIT_FROM_PRETRAINED:-false}"
 save_dir="${SAVE_DIR:-$repo_dir/training_runs}"
 resume_ckpt="${RESUME_CKPT:-$save_dir/$run_name/checkpoints/last.ckpt}"
 export_path="${EXPORT_PATH:-}"
@@ -41,6 +42,8 @@ echo "[train] start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "[train] repo_dir=$repo_dir"
 echo "[train] run_name=$run_name"
 echo "[train] dataset_config=$dataset_config"
+echo "[train] model=$model"
+echo "[train] init_from_pretrained=$init_from_pretrained"
 
 if [[ ! -f "$dataset_config" ]]; then
   echo "[train] missing dataset config: $dataset_config" >&2
@@ -75,6 +78,11 @@ fi
 
 if [[ -n "$checkpoint" ]]; then
   model_args+=(--checkpoint "$checkpoint")
+fi
+if [[ "$init_from_pretrained" == "1" || "$init_from_pretrained" == "true" || "$init_from_pretrained" == "yes" ]]; then
+  model_args+=(--init_from_pretrained)
+else
+  model_args+=(--no-init-from-pretrained)
 fi
 
 resume_args=()
