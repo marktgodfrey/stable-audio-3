@@ -10,6 +10,7 @@ model="${MODEL:-medium-base}"
 model_config="${MODEL_CONFIG:-}"
 checkpoint="${CHECKPOINT:-}"
 init_from_pretrained="${INIT_FROM_PRETRAINED:-false}"
+pretransform_model="${PRETRANSFORM_MODEL:-}"
 save_dir="${SAVE_DIR:-$repo_dir/training_runs}"
 resume_ckpt="${RESUME_CKPT:-$save_dir/$run_name/checkpoints/last.ckpt}"
 export_path="${EXPORT_PATH:-}"
@@ -84,6 +85,10 @@ if [[ "$init_from_pretrained" == "1" || "$init_from_pretrained" == "true" || "$i
   model_args+=(--init_from_pretrained)
 else
   model_args+=(--no-init-from-pretrained)
+fi
+if [[ -n "$pretransform_model" ]]; then
+  echo "[train] pretransform_model=$pretransform_model"
+  model_args+=(--pretransform_model "$pretransform_model")
 fi
 
 resume_args=()

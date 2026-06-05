@@ -28,8 +28,8 @@ from safetensors.torch import load_file
 
 from stable_audio_3.data.dataset import create_dataloader_from_config
 from stable_audio_3.factory import create_diffusion_cond_from_config
-from stable_audio_3.loading_utils import copy_state_dict
-from stable_audio_3.model_configs import base_models
+from stable_audio_3.loading_utils import copy_state_dict, load_autoencoder
+from stable_audio_3.model_configs import ae_models, base_models
 from stable_audio_3.training.diffusion import DiffusionCondInpaintDemoCallback, DiffusionCondTrainingWrapper
 
 
@@ -61,6 +61,32 @@ def load_model(model_name, model_config_path, checkpoint_path, init_from_pretrai
     return model, model_config
 
 
+def load_pretrained_pretransform(model, pretransform_model_name):
+    if pretransform_model_name is None:
+        return
+
+    if model.pretransform is None:
+        raise ValueError(
+            f"Cannot load pretransform model '{pretransform_model_name}': model has no pretransform"
+        )
+
+    if pretransform_model_name not in ae_models:
+        raise ValueError(
+            f"Unknown pretransform model '{pretransform_model_name}', valid: {list(ae_models)}"
+        )
+
+    cfg = ae_models[pretransform_model_name]
+    local_config, local_ckpt = cfg.resolve()
+    print(
+        f"Loading pretrained pretransform '{pretransform_model_name}' "
+        f"from {local_ckpt}"
+    )
+    autoencoder = load_autoencoder(local_config, local_ckpt, device="cpu")
+    copy_state_dict(model.pretransform.model, autoencoder.state_dict())
+    model.pretransform.enable_grad = False
+    model.pretransform.eval().requires_grad_(False)
+
+
 def train(args):
     torch._dynamo.config.capture_scalar_outputs = True
     torch.set_float32_matmul_precision("high")
@@ -73,6 +99,8 @@ def train(args):
         args.init_from_pretrained,
     )
     training_config = model_config.get("training", {})
+    pretransform_model = args.pretransform_model or training_config.get("pretransform_model")
+    load_pretrained_pretransform(model, pretransform_model)
     use_ema = args.use_ema if args.use_ema is not None else training_config.get("use_ema", False)
     timestep_sampler = (
         args.timestep_sampler
@@ -254,6 +282,15 @@ def main():
     p.add_argument("--model", choices=list(base_models), default=None)
     p.add_argument("--model_config", default=None)
     p.add_argument("--checkpoint", default=None)
+    p.add_argument(
+        "--pretransform_model",
+        choices=list(ae_models),
+        default=None,
+        help=(
+            "Initialize the model pretransform from a public SAME autoencoder "
+            "checkpoint, e.g. same-l. Can also be set as training.pretransform_model."
+        ),
+    )
     p.add_argument(
         "--init_from_pretrained",
         "--init-from-pretrained",
