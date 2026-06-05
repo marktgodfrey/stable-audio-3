@@ -70,10 +70,12 @@ class DiffusionCondTrainingWrapper(pl.LightningModule):
             log_every_n_steps: int = 10,
             ot_coupling: bool = False,
             base_precision: tp.Optional[str] = None,
+            skip_pretransform_checkpoint_restore: bool = False,
     ):
         super().__init__()
 
         self.ot_coupling = ot_coupling
+        self.skip_pretransform_checkpoint_restore = skip_pretransform_checkpoint_restore
 
         self.diffusion = model
 
@@ -223,6 +225,27 @@ class DiffusionCondTrainingWrapper(pl.LightningModule):
 
         for validation_timestep in self.validation_timesteps:
             self.validation_step_outputs[f'val/loss_{validation_timestep:.1f}'] = []
+
+    def on_load_checkpoint(self, checkpoint):
+        if not self.skip_pretransform_checkpoint_restore:
+            return
+
+        state_dict = checkpoint.get("state_dict")
+        if not state_dict:
+            return
+
+        pretransform_keys = [
+            key for key in state_dict if key.startswith("diffusion.pretransform.")
+        ]
+        for key in pretransform_keys:
+            del state_dict[key]
+
+        if pretransform_keys:
+            print(
+                "Skipped restoring "
+                f"{len(pretransform_keys)} pretransform tensors from checkpoint; "
+                "using pretrained pretransform weights loaded at startup."
+            )
 
     def _validate_conditioning_dropout_probs(
         self, conditioning_dropout_probs: tp.Optional[tp.Dict[str, float]]

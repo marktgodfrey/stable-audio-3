@@ -82,9 +82,21 @@ def load_pretrained_pretransform(model, pretransform_model_name):
         f"from {local_ckpt}"
     )
     autoencoder = load_autoencoder(local_config, local_ckpt, device="cpu")
+    source_state = autoencoder.state_dict()
+    target_state = model.pretransform.model.state_dict()
+    matched = sum(
+        1
+        for key, value in source_state.items()
+        if key in target_state and target_state[key].shape == value.shape
+    )
+    print(
+        f"Pretrained pretransform '{pretransform_model_name}' matching tensors: "
+        f"{matched}/{len(target_state)}"
+    )
     copy_state_dict(model.pretransform.model, autoencoder.state_dict())
     model.pretransform.enable_grad = False
     model.pretransform.eval().requires_grad_(False)
+    model.pretransform._pretrained_model_name = pretransform_model_name
 
 
 def train(args):
@@ -181,6 +193,7 @@ def train(args):
         sample_size=sample_size,
         log_every_n_steps=args.log_every,
         ot_coupling=ot_coupling,
+        skip_pretransform_checkpoint_restore=pretransform_model is not None,
     )
 
     logger = None
