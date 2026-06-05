@@ -234,15 +234,18 @@ class DiffusionCondTrainingWrapper(pl.LightningModule):
         if not state_dict:
             return
 
+        current_state = self.state_dict()
         pretransform_keys = [
-            key for key in state_dict if key.startswith("diffusion.pretransform.")
+            key
+            for key in state_dict
+            if key.startswith("diffusion.pretransform.") and key in current_state
         ]
         for key in pretransform_keys:
-            del state_dict[key]
+            state_dict[key] = current_state[key].detach().clone()
 
         if pretransform_keys:
             print(
-                "Skipped restoring "
+                "Replaced "
                 f"{len(pretransform_keys)} pretransform tensors from checkpoint; "
                 "using pretrained pretransform weights loaded at startup."
             )
