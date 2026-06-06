@@ -129,6 +129,13 @@ fi
 if [[ -n "${VALIDATION_EVERY:-}" ]]; then
   demo_args+=(--validation_every "$VALIDATION_EVERY")
 fi
+if [[ "${INPAINT_DEMOS_FROM_TRAIN_LOADER:-true}" == "0" || "${INPAINT_DEMOS_FROM_TRAIN_LOADER:-true}" == "false" || "${INPAINT_DEMOS_FROM_TRAIN_LOADER:-true}" == "no" ]]; then
+  echo "[train] inpaint_demos_from_train_loader=false"
+  demo_args+=(--no-inpaint-demos-from-train-loader)
+elif [[ -n "${INPAINT_DEMOS_FROM_TRAIN_LOADER:-}" ]]; then
+  echo "[train] inpaint_demos_from_train_loader=true"
+  demo_args+=(--inpaint-demos-from-train-loader)
+fi
 
 "$python_bin" scripts/train_diffusion.py \
   "${model_args[@]}" \

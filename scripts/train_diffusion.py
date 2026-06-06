@@ -238,7 +238,16 @@ def train(args):
 
     if demo_every and demo_every > 0:
         configured_num_demos = args.num_demos if args.num_demos is not None else demo_config.get("num_demos", 4)
-        demo_source_loader = valid_dataloaders[0] if valid_dataloaders else dataloader
+        inpaint_demos_from_train_loader = (
+            args.inpaint_demos_from_train_loader
+            if args.inpaint_demos_from_train_loader is not None
+            else demo_config.get("inpaint_demos_from_train_loader", True)
+        )
+        demo_source_loader = valid_dataloaders[0] if valid_dataloaders else None
+        if demo_source_loader is None and inpaint_demos_from_train_loader:
+            demo_source_loader = dataloader
+        elif demo_source_loader is None and configured_num_demos > 0:
+            print("[train] inpaint demos disabled: no validation/demo loader and train-loader fallback is off")
 
         callbacks.append(
             DiffusionCondInpaintDemoCallback(
@@ -334,6 +343,16 @@ def main():
     p.add_argument("--demo_steps", type=int, default=None)
     p.add_argument("--num_demos", type=int, default=None)
     p.add_argument("--demo_cfg_scales", type=float, nargs="+", default=None)
+    p.add_argument(
+        "--inpaint-demos-from-train-loader",
+        dest="inpaint_demos_from_train_loader",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help=(
+            "When no validation/demo loader exists, use the train loader for inpaint demos. "
+            "Disable with --no-inpaint-demos-from-train-loader to keep prompt demos only."
+        ),
+    )
     p.add_argument("--validation_every", type=int, default=None)
     p.add_argument("--export_path", default=None)
     p.add_argument("--precision", default="bf16-mixed")
