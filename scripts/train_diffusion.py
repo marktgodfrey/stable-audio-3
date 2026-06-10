@@ -114,6 +114,7 @@ def train(args):
     pretransform_model = args.pretransform_model or training_config.get("pretransform_model")
     load_pretrained_pretransform(model, pretransform_model)
     use_ema = args.use_ema if args.use_ema is not None else training_config.get("use_ema", False)
+    ema_config = training_config.get("ema_config")
     timestep_sampler = (
         args.timestep_sampler
         if args.timestep_sampler is not None
@@ -180,6 +181,7 @@ def train(args):
         mask_padding_attention=args.mask_padding_attention,
         silence_extension_scale_seconds=silence_extension_scale_seconds,
         use_ema=use_ema,
+        ema_config=ema_config,
         log_loss_info=log_loss_info,
         optimizer_configs=optimizer_config,
         pre_encoded=dataset_config.get("pre_encoded", False),
