@@ -8,6 +8,8 @@ import torch.nn.functional as F
 import os
 import typing as tp
 
+from einops import rearrange
+
 def get_rank():
     """Get rank of current process."""
 
@@ -438,6 +440,50 @@ def compute_masked_loss(
     padding_mean = padding.sum() / (padding_count.sum() + 1e-8)
 
     return loss, signal_mean.detach(), padding_mean.detach()
+
+
+def bucket_loss_by_sigma(
+    loss_all: torch.Tensor,
+    sigmas: torch.Tensor,
+    loss_mask: torch.Tensor,
+    all_gather_fn: tp.Callable[[torch.Tensor], torch.Tensor],
+    num_buckets: int = 10,
+) -> torch.Tensor:
+    """
+    Bucket per-element diffusion loss by noise level for diagnostic logging.
+
+    Positions outside loss_mask receive no gradient (and no attention when
+    mask_padding_attention is on), so the model's output there is unconstrained
+    and drifts over training; including those positions would contaminate the
+    bucket means. They are NaN-masked before gathering (NaNs travel through
+    all_gather like any float) and skipped via nanmean.
+
+    Args:
+        loss_all: Per-element loss of shape (B, C, T)
+        sigmas: Noise levels of shape (B, 1, 1)
+        loss_mask: Boolean mask of shape (B, T), True = position contributes to the training loss
+        all_gather_fn: Gathers a tensor across ranks, returning shape (world_size, *tensor_shape)
+        num_buckets: Number of sigma buckets covering [0, 1)
+
+    Returns:
+        Tensor of shape (num_buckets,) with the mean loss per sigma bucket over
+        loss-contributing positions; NaN for buckets with no samples
+    """
+    bucket_size = 1 / num_buckets
+
+    # Exclude padding/context positions from the diagnostics
+    loss_all = torch.where(loss_mask.unsqueeze(1), loss_all, float("nan"))
+
+    sigmas = rearrange(all_gather_fn(sigmas), "w b c n -> (w b) c n").squeeze()
+
+    # gather loss_all across all GPUs
+    loss_all = rearrange(all_gather_fn(loss_all), "w b c n -> (w b) c n")
+
+    # Bucket loss values based on corresponding sigma values, bucketing sigma values by bucket_size
+    return torch.stack([
+        loss_all[(sigmas >= i) & (sigmas < i + bucket_size)].nanmean()
+        for i in torch.arange(0, 1, bucket_size).to(loss_all.device)
+    ])
 
 
 def masked_mean(

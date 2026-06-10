@@ -7,7 +7,6 @@ import gc
 import typing as tp
 import torchaudio
 
-from einops import rearrange
 from safetensors.torch import save_file
 from functools import partial
 from torch.nn import functional as F
@@ -17,7 +16,7 @@ from ..inference.sampling import truncated_logistic_normal_rescaled, sample_time
 from ..models.diffusion import ConditionedDiffusionModelWrapper
 from ..models.inpainting import random_inpaint_mask, MaskType
 from ..models.lora import add_lora, get_lora_params, get_lora_state_dict, LoRAParametrization, get_lora_layers, save_lora_safetensors, resolve_adapter_type, prepare_dora_state_dict, cast_base_to_precision
-from .utils import create_optimizer_from_config, create_scheduler_from_config, log_audio, log_image, log_metric, get_rank, create_augmented_padding_mask, compute_masked_loss, compute_normalized_mse, resize_padding_mask, StaggeredLogger, compute_per_elem_trim, trim_and_concat
+from .utils import create_optimizer_from_config, create_scheduler_from_config, log_audio, log_image, log_metric, get_rank, bucket_loss_by_sigma, create_augmented_padding_mask, compute_masked_loss, compute_normalized_mse, resize_padding_mask, StaggeredLogger, compute_per_elem_trim, trim_and_concat
 from time import time
 
 class Profiler:
@@ -503,16 +502,12 @@ class DiffusionCondTrainingWrapper(pl.LightningModule):
         if self.log_loss_info:
             # Loss debugging logs
             num_loss_buckets = 10
-            bucket_size = 1 / num_loss_buckets
             loss_all = F.mse_loss(output, targets, reduction="none")
 
-            sigmas = rearrange(self.all_gather(sigmas), "w b c n -> (w b) c n").squeeze()
-
-            # gather loss_all across all GPUs
-            loss_all = rearrange(self.all_gather(loss_all), "w b c n -> (w b) c n")
-
-            # Bucket loss values based on corresponding sigma values, bucketing sigma values by bucket_size
-            loss_all = torch.stack([loss_all[(sigmas >= i) & (sigmas < i + bucket_size)].mean() for i in torch.arange(0, 1, bucket_size).to(self.device)])
+            # Bucket by sigma over loss-contributing positions only, so the bins
+            # track the same regions as the training loss instead of drifting with
+            # the unconstrained model output on padding/context positions
+            loss_all = bucket_loss_by_sigma(loss_all, sigmas, loss_mask, self.all_gather, num_loss_buckets)
 
             # Log bucketed losses with corresponding sigma bucket values, if it's not NaN
             debug_log_dict = {
