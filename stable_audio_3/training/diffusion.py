@@ -16,6 +16,7 @@ from ..inference.sampling import truncated_logistic_normal_rescaled, sample_time
 from ..models.diffusion import ConditionedDiffusionModelWrapper
 from ..models.inpainting import random_inpaint_mask, MaskType
 from ..models.lora import add_lora, get_lora_params, get_lora_state_dict, LoRAParametrization, get_lora_layers, save_lora_safetensors, resolve_adapter_type, prepare_dora_state_dict, cast_base_to_precision
+from .ema import EMA
 from .utils import create_optimizer_from_config, create_scheduler_from_config, log_audio, log_image, log_metric, get_rank, bucket_loss_by_sigma, create_augmented_padding_mask, compute_masked_loss, compute_normalized_mse, resize_padding_mask, StaggeredLogger, compute_per_elem_trim, trim_and_concat
 from time import time
 
@@ -48,6 +49,7 @@ class DiffusionCondTrainingWrapper(pl.LightningModule):
             mask_padding_attention: bool = False,
             silence_extension_scale_seconds: float = 0.0,
             use_ema: bool = True,
+            ema_config: tp.Optional[tp.Dict[str, tp.Any]] = None,
             log_loss_info: bool = False,
             optimizer_configs: dict = None,
             pre_encoded: bool = False,
@@ -134,7 +136,26 @@ class DiffusionCondTrainingWrapper(pl.LightningModule):
                         torch.bfloat16 if base_precision in ("bf16", "bfloat16") else torch.float16
                     )
 
-        self.diffusion_ema = None
+        # EMA of the diffusion model weights (paper section 3.5: beta=0.9995 with
+        # power-law warmup, exponent 0.75). Demos and export_model use the EMA copy
+        # when enabled. The EMA is registered as a submodule, so its weights and
+        # step counter ride along in Lightning checkpoints.
+        ema_config = ema_config or {}
+        if use_ema:
+            self.diffusion_ema = EMA(
+                self.diffusion.model,
+                beta=ema_config.get("beta", 0.9995),
+                power=ema_config.get("power", 0.75),
+                inv_gamma=ema_config.get("inv_gamma", 1.0),
+                update_every=ema_config.get("update_every", 1),
+                update_after_step=ema_config.get("update_after_step", 0),
+                dtype=ema_config.get("dtype"),
+                device=ema_config.get("device"),
+            )
+        else:
+            self.diffusion_ema = None
+        self._ema_last_global_step = 0
+
         self.mask_loss_weight = mask_loss_weight
 
         # Attention masking for padded tokens
@@ -226,28 +247,101 @@ class DiffusionCondTrainingWrapper(pl.LightningModule):
             self.validation_step_outputs[f'val/loss_{validation_timestep:.1f}'] = []
 
     def on_load_checkpoint(self, checkpoint):
-        if not self.skip_pretransform_checkpoint_restore:
-            return
-
         state_dict = checkpoint.get("state_dict")
         if not state_dict:
             return
 
-        current_state = self.state_dict()
-        pretransform_keys = [
-            key
-            for key in state_dict
-            if key.startswith("diffusion.pretransform.") and key in current_state
-        ]
-        for key in pretransform_keys:
-            state_dict[key] = current_state[key].detach().clone()
+        if self.skip_pretransform_checkpoint_restore:
+            current_state = self.state_dict()
+            pretransform_keys = [
+                key
+                for key in state_dict
+                if key.startswith("diffusion.pretransform.") and key in current_state
+            ]
+            for key in pretransform_keys:
+                state_dict[key] = current_state[key].detach().clone()
 
-        if pretransform_keys:
+            if pretransform_keys:
+                print(
+                    "Replaced "
+                    f"{len(pretransform_keys)} pretransform tensors from checkpoint; "
+                    "using pretrained pretransform weights loaded at startup."
+                )
+
+        self._sync_ema_checkpoint_state(state_dict)
+
+    def _sync_ema_checkpoint_state(self, state_dict):
+        """Reconcile EMA state between a checkpoint and the current configuration.
+
+        - use_ema on, checkpoint has no EMA state (resuming a run trained before
+          EMA support, or with use_ema previously off): seed the EMA from the
+          checkpoint's online diffusion weights and restart the decay warmup.
+        - use_ema off, checkpoint has EMA state: drop it so strict loading passes.
+        """
+        ema_prefix = "diffusion_ema."
+        has_ema_state = any(key.startswith(ema_prefix) for key in state_dict)
+
+        if self.diffusion_ema is not None and not has_ema_state:
+            ema_model_prefix = "diffusion_ema.ema_model."
+            online_prefix = "diffusion.model."
+            seeded = 0
+            for key, current_value in self.state_dict().items():
+                if not key.startswith(ema_prefix):
+                    continue
+                if key.startswith(ema_model_prefix):
+                    online_key = online_prefix + key[len(ema_model_prefix):]
+                    if online_key in state_dict:
+                        state_dict[key] = state_dict[online_key].detach().clone().to(current_value.dtype)
+                        seeded += 1
+                        continue
+                # Keys without an online counterpart (e.g. the step counter) keep
+                # their current values: step stays 0, so the warmup restarts.
+                state_dict[key] = current_value.detach().clone()
             print(
-                "Replaced "
-                f"{len(pretransform_keys)} pretransform tensors from checkpoint; "
-                "using pretrained pretransform weights loaded at startup."
+                f"Checkpoint has no EMA state; seeded {seeded} EMA tensors from the "
+                "checkpoint's online weights. EMA decay warmup restarts from step 0."
             )
+        elif self.diffusion_ema is None and has_ema_state:
+            dropped = [key for key in state_dict if key.startswith(ema_prefix)]
+            for key in dropped:
+                del state_dict[key]
+            print(f"use_ema is disabled; dropped {len(dropped)} EMA tensors from the checkpoint.")
+
+    def on_fit_start(self):
+        if self.diffusion_ema is None:
+            return
+
+        if self.diffusion_ema.ema_device is not None and self.trainer.world_size > 1:
+            # DDP broadcasts module buffers from rank 0 on each forward; buffers
+            # pinned to another device would make that collective fail.
+            print(
+                "WARNING: EMA device pinning is not supported with multi-device "
+                "training; keeping the EMA copy on the model device."
+            )
+            self.diffusion_ema.ema_device = None
+        else:
+            self.diffusion_ema.pin_ema_device()
+
+    def on_train_start(self):
+        # Anchor the gradient-accumulation guard. This must happen in
+        # on_train_start: when resuming, Lightning restores the loop counters
+        # (and thus trainer.global_step) after on_fit_start has already run.
+        self._ema_last_global_step = self.trainer.global_step
+
+    def on_train_batch_end(self, outputs, batch, batch_idx):
+        if self.diffusion_ema is None:
+            return
+
+        # global_step advances once per optimizer step, so this guard keeps EMA
+        # updates aligned with weight updates under gradient accumulation. The
+        # update runs on every rank: after the optimizer step the online weights
+        # are identical across ranks, so each rank's EMA copy stays identical.
+        global_step = self.trainer.global_step
+        if global_step == self._ema_last_global_step:
+            return
+        self._ema_last_global_step = global_step
+
+        self.diffusion_ema.update()
 
     def _validate_conditioning_dropout_probs(
         self, conditioning_dropout_probs: tp.Optional[tp.Dict[str, float]]
@@ -1011,6 +1105,11 @@ class DiffusionCondInpaintDemoCallback(pl.Callback):
 
         self.last_demo_step = trainer.global_step
 
+        # If the EMA copy is pinned to another device (e.g. cpu), bring it onto
+        # the module device for sampling; restored to its pin in the finally below.
+        if module.diffusion_ema is not None:
+            module.diffusion_ema.ema_model.to(module.device)
+
         try:
             # Generate both types of demos, freeing intermediates between phases
             prompt_audio, prompt_masks = self._generate_prompt_demos(module, trainer, is_rank_zero)
@@ -1250,6 +1349,8 @@ class DiffusionCondInpaintDemoCallback(pl.Callback):
                 print(f'{type(e).__name__}: {e}')
             raise e
         finally:
+            if module.diffusion_ema is not None:
+                module.diffusion_ema.pin_ema_device()
             gc.collect()
             torch.cuda.empty_cache()
-            module.train()            
+            module.train()
