@@ -240,6 +240,8 @@ def train(args):
 
     if demo_every and demo_every > 0:
         configured_num_demos = args.num_demos if args.num_demos is not None else demo_config.get("num_demos", 4)
+        demo_cfg_scales = args.demo_cfg_scales or demo_config.get("demo_cfg_scales", [2, 4, 7])
+        print(f"Demo CFG scales: {demo_cfg_scales}")
         inpaint_demos_from_train_loader = (
             args.inpaint_demos_from_train_loader
             if args.inpaint_demos_from_train_loader is not None
@@ -258,7 +260,7 @@ def train(args):
                 sample_rate=sample_rate,
                 demo_steps=args.demo_steps if args.demo_steps is not None else demo_config.get("demo_steps", 50),
                 num_demos=configured_num_demos,
-                demo_cfg_scales=args.demo_cfg_scales or demo_config.get("demo_cfg_scales", [2, 4, 7]),
+                demo_cfg_scales=demo_cfg_scales,
                 demo_conditioning=demo_config.get("demo_cond", []),
                 inpaint_demo_config=demo_config.get("inpaint_demo_config"),
                 demo_dl=demo_source_loader,

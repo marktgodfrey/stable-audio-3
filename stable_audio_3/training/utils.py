@@ -119,21 +119,47 @@ def logger_project_name(logger) -> str:
 def log_metric(logger, key, value, step=None):
     from pytorch_lightning.loggers import WandbLogger, CometLogger
     if isinstance(logger, WandbLogger):
-        logger.experiment.log({key: value})
+        if step is None:
+            logger.experiment.log({key: value})
+        else:
+            logger.experiment.log({key: value}, step=step)
     elif isinstance(logger, CometLogger):
         logger.experiment.log_metrics({key: value}, step=step)
 
-def log_audio(logger, key, audio_path, sample_rate, caption=None, step=None):
+def log_audio(logger, key, audio_path, sample_rate, caption=None, step=None, commit=None):
     if isinstance(logger, WandbLogger):
-        logger.experiment.log({key: wandb.Audio(audio_path, sample_rate=sample_rate, caption=caption)})
+        kwargs = {}
+        if step is not None:
+            kwargs["step"] = step
+        if commit is not None:
+            kwargs["commit"] = commit
+        logger.experiment.log({key: wandb.Audio(audio_path, sample_rate=sample_rate, caption=caption)}, **kwargs)
     elif isinstance(logger, CometLogger):
         logger.experiment.log_audio(audio_path, file_name=key, sample_rate=sample_rate, step=step)
 
-def log_image(logger, key, img_data, step=None):
+def log_image(logger, key, img_data, step=None, commit=None):
     if isinstance(logger, WandbLogger):
-        logger.experiment.log({key: wandb.Image(img_data)})
+        kwargs = {}
+        if step is not None:
+            kwargs["step"] = step
+        if commit is not None:
+            kwargs["commit"] = commit
+        logger.experiment.log({key: wandb.Image(img_data)}, **kwargs)
     elif isinstance(logger, CometLogger):
         logger.experiment.log_image(img_data, name=key, step=step)
+
+def log_audio_with_image(logger, audio_key, audio_path, sample_rate, image_key, img_data, caption=None, step=None):
+    if isinstance(logger, WandbLogger):
+        kwargs = {}
+        if step is not None:
+            kwargs["step"] = step
+        logger.experiment.log({
+            audio_key: wandb.Audio(audio_path, sample_rate=sample_rate, caption=caption),
+            image_key: wandb.Image(img_data),
+        }, **kwargs)
+    elif isinstance(logger, CometLogger):
+        logger.experiment.log_audio(audio_path, file_name=audio_key, sample_rate=sample_rate, step=step)
+        logger.experiment.log_image(img_data, name=image_key, step=step)
 
 def log_point_cloud(logger, key, tokens, caption=None):
     if isinstance(logger, WandbLogger):

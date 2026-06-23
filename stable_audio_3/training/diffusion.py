@@ -17,7 +17,7 @@ from ..models.diffusion import ConditionedDiffusionModelWrapper
 from ..models.inpainting import random_inpaint_mask, MaskType
 from ..models.lora import add_lora, get_lora_params, get_lora_state_dict, LoRAParametrization, get_lora_layers, save_lora_safetensors, resolve_adapter_type, prepare_dora_state_dict, cast_base_to_precision
 from .ema import EMA
-from .utils import create_optimizer_from_config, create_scheduler_from_config, log_audio, log_image, log_metric, get_rank, bucket_loss_by_sigma, create_augmented_padding_mask, compute_masked_loss, compute_normalized_mse, resize_padding_mask, StaggeredLogger, compute_per_elem_trim, trim_and_concat
+from .utils import create_optimizer_from_config, create_scheduler_from_config, log_audio, log_audio_with_image, log_image, log_metric, get_rank, bucket_loss_by_sigma, create_augmented_padding_mask, compute_masked_loss, compute_normalized_mse, resize_padding_mask, StaggeredLogger, compute_per_elem_trim, trim_and_concat
 from time import time
 
 class Profiler:
@@ -894,12 +894,33 @@ class DiffusionCondInpaintDemoCallback(pl.Callback):
         if not self.demo_conditioning:
             return [], []
 
-        demo_cond = self.demo_conditioning
+        demo_cond = [dict(md) for md in self.demo_conditioning]
         num_demos = len(demo_cond)
 
         demo_samples = self.demo_samples
         if module.diffusion.pretransform is not None:
             demo_samples = demo_samples // module.diffusion.pretransform.downsampling_ratio
+
+        conditioners = getattr(module.diffusion.conditioner, "conditioners", {})
+        seconds_total_conditioner = (
+            conditioners["seconds_total"] if "seconds_total" in conditioners else None
+        )
+        if seconds_total_conditioner is not None:
+            conditioner_max = float(getattr(seconds_total_conditioner, "max_val", 300.0))
+            # Training uses random 40s crops from full tracks, while seconds_total
+            # describes the source track length. Keep fallback demo conditioning in
+            # that long-track distribution rather than using the crop length.
+            default_seconds_total = min(300.0, conditioner_max)
+            added_seconds_total = 0
+            for md in demo_cond:
+                if md.get("seconds_total") in (None, ""):
+                    md["seconds_total"] = default_seconds_total
+                    added_seconds_total += 1
+            if added_seconds_total and is_rank_zero:
+                print(
+                    "Added seconds_total="
+                    f"{default_seconds_total} to {added_seconds_total} prompt demos."
+                )
 
         # Conditioning from prompts
         conditioning = module.diffusion.conditioner(demo_cond, module.device)
@@ -1093,7 +1114,7 @@ class DiffusionCondInpaintDemoCallback(pl.Callback):
 
     @torch.no_grad()
     def on_train_batch_end(self, trainer, module: DiffusionCondTrainingWrapper, outputs, batch, batch_idx):
-        if (trainer.global_step - 1) % self.demo_every != 0 or self.last_demo_step == trainer.global_step:
+        if trainer.global_step % self.demo_every != 0 or self.last_demo_step == trainer.global_step:
             return
 
         is_rank_zero = get_rank() == 0
@@ -1142,8 +1163,15 @@ class DiffusionCondInpaintDemoCallback(pl.Callback):
                     combined_audio = combined_audio.to(torch.float32).div(torch.max(torch.abs(combined_audio))).mul(32767).to(torch.int16).cpu()
                     torchaudio.save(filename, combined_audio, self.sample_rate)
 
-                    log_audio(trainer.logger, f'demo_cfg_{cfg_scale}', filename, self.sample_rate)
-                    log_image(trainer.logger, f'demo_melspec_left_cfg_{cfg_scale}', audio_spectrogram_image(combined_audio, context_mask=combined_mask))
+                    log_audio_with_image(
+                        trainer.logger,
+                        f'demo_cfg_{cfg_scale}',
+                        filename,
+                        self.sample_rate,
+                        f'demo_melspec_left_cfg_{cfg_scale}',
+                        audio_spectrogram_image(combined_audio, context_mask=combined_mask),
+                        step=trainer.global_step,
+                    )
                     if isinstance(trainer.logger, (WandbLogger, CometLogger)):
                         os.remove(filename)
 
@@ -1333,8 +1361,15 @@ class DiffusionCondInpaintDemoCallback(pl.Callback):
                             filename = f'demo_teacher_target_{trainer.global_step:08}.wav'
                             combined_audio = combined_audio.to(torch.float32).div(torch.max(torch.abs(combined_audio))).mul(32767).to(torch.int16).cpu()
                             torchaudio.save(filename, combined_audio, self.sample_rate)
-                            log_audio(trainer.logger, f'demo_teacher_target', filename, self.sample_rate)
-                            log_image(trainer.logger, f'demo_teacher_target_melspec', audio_spectrogram_image(combined_audio, context_mask=combined_mask))
+                            log_audio_with_image(
+                                trainer.logger,
+                                f'demo_teacher_target',
+                                filename,
+                                self.sample_rate,
+                                f'demo_teacher_target_melspec',
+                                audio_spectrogram_image(combined_audio, context_mask=combined_mask),
+                                step=trainer.global_step,
+                            )
                             os.remove(filename)
 
                     del prompt_target, inpaint_target
